@@ -2,7 +2,8 @@ import logging
 import os
 import sys
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
+import secrets
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from config import PORT, CAPTURES_DIR, setup_logging
@@ -40,13 +41,30 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Viora AI Unified Backend")
 
 # Enable CORS for the frontend
+# Never combine credentialed browser requests with a wildcard origin.
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        "CORS_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173"
+    ).split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+def require_admin_token(authorization: str | None) -> None:
+    """Fail closed for endpoints that can trigger privileged local actions."""
+    expected = os.environ.get("ADMIN_API_TOKEN", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="Admin actions are disabled until ADMIN_API_TOKEN is configured.")
+    if not authorization or not secrets.compare_digest(authorization, f"Bearer {expected}"):
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 # Static files for gallery
 os.makedirs(CAPTURES_DIR, exist_ok=True)
@@ -77,7 +95,8 @@ async def health():
     return {"status": "ok"}
 
 @app.post("/security/motion_detected")
-async def security_motion_detected(request: dict):
+async def security_motion_detected(request: dict, authorization: str | None = Header(default=None)):
+    require_admin_token(authorization)
     """Endpoint to receive motion detection from security camera."""
     if trigger_voice_alert:
         import threading
@@ -85,7 +104,8 @@ async def security_motion_detected(request: dict):
     return {"status": "notified"}
 
 @app.post("/security/trigger_alarm")
-async def security_trigger_alarm():
+async def security_trigger_alarm(authorization: str | None = Header(default=None)):
+    require_admin_token(authorization)
     """Endpoint to trigger the alarm."""
     if send_alarm_to_surveillance:
         success = send_alarm_to_surveillance()
@@ -93,7 +113,8 @@ async def security_trigger_alarm():
     return {"status": "error", "message": "unified_security not available"}
 
 @app.post("/security/stop_alarm")
-async def security_stop_alarm():
+async def security_stop_alarm(authorization: str | None = Header(default=None)):
+    require_admin_token(authorization)
     """Endpoint to stop the alarm."""
     try:
         from unified_security import stop_alarm_on_surveillance
@@ -119,7 +140,8 @@ async def startup_event():
     logger.info("Unified Backend ready.")
 
 @app.post("/shutdown")
-async def shutdown():
+async def shutdown(authorization: str | None = Header(default=None)):
+    require_admin_token(authorization)
     import threading
     import time
     def delayed_exit():
@@ -129,7 +151,8 @@ async def shutdown():
     return {"status": "shutting down..."}
 
 @app.post("/start_surveillance")
-async def start_surveillance():
+async def start_surveillance(authorization: str | None = Header(default=None)):
+    require_admin_token(authorization)
     import subprocess
     import threading
     
